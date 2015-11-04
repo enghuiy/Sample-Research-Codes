@@ -1,0 +1,163 @@
+#!/usr/bin/perl -w
+
+# script by enghui yap - Dec 2013
+# greedy clustering in one program 
+# 1. compute 'distance' = RMSD OF HEAVY ATOMS <=========
+# 2. quick greedy clustering by a cutoff 
+# cluster together if RMSD <= cutoff
+#
+# arguments 
+# argument 1 : pdbfile with models to cluster 
+# argument 2 : cutoff to use
+# argument 3 : outfilename
+
+use strict;
+
+# main program
+(@ARGV==3) || die("Usage:[multimodel-pdbfile to cluster] [RMSD cutoff to cluster] [outfile] \n");
+my $pdbfile = $ARGV[0];
+my $cutoff      = $ARGV[1];
+my $outfile     = $ARGV[2];
+my $cenoutfile  = $outfile.".cen";
+
+#
+# open pdbfile
+#
+open(FILE, $pdbfile) or die ("Can't open joblist $pdbfile\n");
+my (@ids,@x_allPDBs,@y_allPDBs,@z_allPDBs); 
+my $n=0; my $nlines;
+my $bStart=0;
+
+while (<FILE>) {
+  
+  my @buf = split(" ");
+  if (/^MODEL/) {
+    push(@ids,$buf[1]);	
+    $bStart=1;
+    my @x = (); my @y = (); my @z = ();
+    push(@x_allPDBs,\@x); 
+    push(@y_allPDBs,\@y); 
+    push(@z_allPDBs,\@z); 
+  } 
+  elsif (/^ENDMDL/) {
+    $bStart=0;
+  }
+  elsif ( $bStart==1 && /^ATOM/ && $buf[2] !~ /^H/){
+    push(@{$x_allPDBs[-1]},substr($_,31,7));
+    push(@{$y_allPDBs[-1]},substr($_,39,7));
+    push(@{$z_allPDBs[-1]},substr($_,47,7));
+  }
+} 
+close FILE;
+
+my $nModel = scalar(@z_allPDBs);
+my $nAtom = scalar(@{$z_allPDBs[0]});
+print "# models = $nModel; atoms = $nAtom\n";
+
+# 
+# Fill up pairwise dist matrix (lower triangle only)
+#
+my @distmat;
+
+for (my $i=0;$i<$nModel;$i++) {
+  my @distline = ("X") x $nModel;
+  
+  for (my $j=0;$j<$i;$j++) {
+    
+      $distline[$j] = rmsd_oneArray(\@x_allPDBs,\@y_allPDBs,\@z_allPDBs,$i,$j,$nAtom);
+  }
+#  print join " ", @distline,"\n";
+
+  $distmat[$i] = \@distline; 
+} 
+#=====================================================================
+# start partitioning
+open ( CENOUTFILE, ">$cenoutfile") || die "Cannot open $cenoutfile!\n";
+
+my @left_ind = 0..$nModel-1; # pointer to what's left
+
+my $cstop=$nModel; my $c=0;
+my @clusters= (-1) x $nModel;
+
+my $nLeftSize = scalar(@left_ind);
+
+while ( $nLeftSize != 0 && $c<$cstop) {
+  
+  # process all points to find the next best center
+  my $maxmember=0;
+  my $maxid;
+  for (my $pcen=0;$pcen<$nLeftSize;$pcen++) {
+    my $ncen = $left_ind[$pcen];
+    
+    my $member_thisCen=1; # itself
+    for (my $p=0;$p<$nLeftSize;$p++) {
+      if ($p == $pcen) {next;}
+      my $n = $left_ind[$p];
+      my $dist = $ncen > $n ? $distmat[$ncen][$n] : $distmat[$n][$ncen];
+      ($dist > -1 ) || die "dist = $dist <= -1 for $ncen $n \n";
+      
+      if ($dist <= $cutoff) {
+	$member_thisCen++; 
+      }
+    }# endp
+    
+    if ($member_thisCen > $maxmember) { $maxmember = $member_thisCen; $maxid = $ncen; }
+  } # endpcen
+  
+  # print out the center to center file
+  print CENOUTFILE "$c $ids[$maxid] $maxmember\n";
+  
+  # assign cluster # to those belonging with center; omit them from new_left_ind
+  my @new_left_ind = ();
+  for (my $p=0;$p<$nLeftSize;$p++) {
+    my $n = $left_ind[$p];
+    
+    if ($n == $maxid) { $clusters[$n] = $c;}
+    else {
+      my $dist = $maxid > $n ? $distmat[$maxid][$n] : $distmat[$n][$maxid];
+      ($dist > -1 ) || die "dist = $dist <= -1 for $maxid $n \n";
+      if ($dist <= $cutoff) {
+	$clusters[$n] = $c;
+      }
+      else {
+	push(@new_left_ind, $n);
+      }	
+    }
+    
+  }# endp                                        
+  
+  @left_ind = @new_left_ind;
+  $nLeftSize = scalar(@left_ind);
+  
+  
+  $c++;
+}
+
+my $nCluster = $c; 
+
+open (OUTFILE,">$outfile");
+for (my $n=0;$n<$nModel;$n++){
+  printf OUTFILE "$ids[$n] $clusters[$n]\n";
+}
+close OUTFILE;
+#=========================
+sub rmsd_oneArray {
+  my $ref_x = shift;
+  my $ref_y = shift;
+  my $ref_z = shift;
+  my $i = shift;
+  my $j = shift;
+  my $nAtom = shift;
+
+  my $rmsd = 0; 
+  
+  for (my $k=0;$k<$nAtom; $k++) {
+    my $dx = $ref_x->[$i][$k] - $ref_x->[$j][$k];
+    my $dy = $ref_y->[$i][$k] - $ref_y->[$j][$k];
+    my $dz = $ref_z->[$i][$k] - $ref_z->[$j][$k];
+    my $distsq = ($dx*$dx + $dy*$dy + $dz*$dz);
+    $rmsd += $distsq;
+  }
+  $rmsd = sqrt($rmsd/$nAtom);
+  return $rmsd;
+}
